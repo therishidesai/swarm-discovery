@@ -1,6 +1,6 @@
 use crate::{
     receiver::{receiver, ReceiverError},
-    sender::{self, sender},
+    sender::{self},
     socket::Sockets,
     updater::updater,
     Discoverer,
@@ -21,7 +21,7 @@ pub enum Input {
 pub async fn guardian(
     mut ctx: ActoCell<Input, AcTokioRuntime, Result<(), ReceiverError>>,
     mut discoverer: Discoverer,
-    sockets: Sockets,
+    sockets_vec: Vec<Sockets>,
     service_name: Name,
 ) {
     let callback = replace(&mut discoverer.callback, Box::new(|_, _| {}));
@@ -32,28 +32,34 @@ pub async fn guardian(
             .map_handle(Ok),
     );
 
-    let sockets2 = sockets.clone();
     let sn = service_name.clone();
+    let sockets_vec_clone = sockets_vec.clone();
     let snd_ref = ctx.supervise(
         ctx.spawn("sender", move |ctx| {
-            sender(ctx, sockets, upd_ref, discoverer, sn)
+            sender::sender(ctx, sockets_vec_clone, upd_ref, discoverer, sn)
         })
         .map_handle(Ok),
     );
 
-    if let Some(v4) = sockets2.v4() {
-        let service_name = service_name.clone();
-        let snd_ref = snd_ref.clone();
-        ctx.spawn_supervised("receiver_v4", move |ctx| {
-            receiver(ctx, service_name, v4, snd_ref)
-        });
-    }
+    // Spawn receivers for all sockets
+    for (socket_idx, sockets) in sockets_vec.iter().enumerate() {
+        if let Some(v4) = sockets.v4() {
+            let service_name = service_name.clone();
+            let snd_ref = snd_ref.clone();
+            let receiver_name = format!("receiver_v4_{}", socket_idx);
+            ctx.spawn_supervised(&receiver_name, move |ctx| {
+                receiver(ctx, service_name, v4, snd_ref)
+            });
+        }
 
-    if let Some(v6) = sockets2.v6() {
-        let snd_ref = snd_ref.clone();
-        ctx.spawn_supervised("receiver_v6", move |ctx| {
-            receiver(ctx, service_name, v6, snd_ref)
-        });
+        if let Some(v6) = sockets.v6() {
+            let service_name = service_name.clone();
+            let snd_ref = snd_ref.clone();
+            let receiver_name = format!("receiver_v6_{}", socket_idx);
+            ctx.spawn_supervised(&receiver_name, move |ctx| {
+                receiver(ctx, service_name, v6, snd_ref)
+            });
+        }
     }
 
     // only stop when a supervised actor stops

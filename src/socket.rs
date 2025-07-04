@@ -91,6 +91,14 @@ pub enum SocketError {
 }
 
 pub fn socket_v4() -> Result<UdpSocket, SocketError> {
+    socket_v4_on_interface(Ipv4Addr::UNSPECIFIED)
+}
+
+/// Create an IPv4 mDNS socket bound to a specific interface.
+/// 
+/// The `interface` parameter should be the IPv4 address of the interface to bind to.
+/// Use `Ipv4Addr::UNSPECIFIED` (0.0.0.0) to bind to all interfaces.
+pub fn socket_v4_on_interface(interface: Ipv4Addr) -> Result<UdpSocket, SocketError> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).map_err(|source| {
         SocketError::NewSocket {
             domain: IP::Ipv4,
@@ -123,7 +131,7 @@ pub fn socket_v4() -> Result<UdpSocket, SocketError> {
             source,
         })?;
     socket
-        .join_multicast_v4(&MDNS_IPV4, &Ipv4Addr::UNSPECIFIED)
+        .join_multicast_v4(&MDNS_IPV4, &interface)
         .map_err(|source| SocketError::JoinMulticast {
             domain: IP::Ipv4,
             source,
@@ -149,6 +157,14 @@ pub fn socket_v4() -> Result<UdpSocket, SocketError> {
 }
 
 pub fn socket_v6() -> Result<UdpSocket, SocketError> {
+    socket_v6_on_interface(0)
+}
+
+/// Create an IPv6 mDNS socket bound to a specific interface.
+/// 
+/// The `interface_index` parameter should be the index of the interface to use for multicast.
+/// Use 0 to let the system choose the default interface.
+pub fn socket_v6_on_interface(interface_index: u32) -> Result<UdpSocket, SocketError> {
     let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).map_err(|source| {
         SocketError::NewSocket {
             domain: IP::Ipv6,
@@ -181,7 +197,7 @@ pub fn socket_v6() -> Result<UdpSocket, SocketError> {
             source,
         })?;
     socket
-        .join_multicast_v6(&MDNS_IPV6, 0)
+        .join_multicast_v6(&MDNS_IPV6, interface_index)
         .map_err(|source| SocketError::JoinMulticast {
             domain: IP::Ipv6,
             source,
@@ -232,6 +248,39 @@ impl Sockets {
         }
     }
 
+    /// Create sockets for a specific network interface.
+    /// 
+    /// For IPv4 addresses, creates a socket that joins the multicast group on that interface.
+    /// For IPv6 addresses, you should also provide the interface index.
+    /// 
+    /// # Example
+    /// ```no_run
+    /// use std::net::{IpAddr, Ipv4Addr};
+    /// use swarm_discovery::Sockets;
+    /// 
+    /// // Create sockets for a specific IPv4 interface
+    /// let interface_ip = Ipv4Addr::new(192, 168, 1, 100);
+    /// let sockets = Sockets::new_for_interface(IpAddr::V4(interface_ip), None).unwrap();
+    /// ```
+    pub fn new_for_interface(interface_addr: IpAddr, interface_index: Option<u32>) -> Result<Self, SocketError> {
+        match interface_addr {
+            IpAddr::V4(v4_addr) => {
+                let v4_socket = socket_v4_on_interface(v4_addr)?;
+                Ok(Self {
+                    v4: Some(Arc::new(v4_socket)),
+                    v6: None,
+                })
+            }
+            IpAddr::V6(_) => {
+                let v6_socket = socket_v6_on_interface(interface_index.unwrap_or(0))?;
+                Ok(Self {
+                    v4: None,
+                    v6: Some(Arc::new(v6_socket)),
+                })
+            }
+        }
+    }
+
     pub fn v4(&self) -> Option<Arc<UdpSocket>> {
         self.v4.as_ref().map(Arc::clone)
     }
@@ -248,17 +297,38 @@ impl Sockets {
                 return;
             }
         };
+        
         let (socket, addr) = match mode {
-            Mode::V4 => (self.v4.as_ref().unwrap(), IpAddr::from(MDNS_IPV4)),
-            Mode::V6 => (self.v6.as_ref().unwrap(), IpAddr::from(MDNS_IPV6)),
+            Mode::V4 => {
+                match &self.v4 {
+                    Some(v4) => (v4, IpAddr::from(MDNS_IPV4)),
+                    None => {
+                        tracing::trace!("No IPv4 socket available, skipping IPv4 send");
+                        return;
+                    }
+                }
+            }
+            Mode::V6 => {
+                match &self.v6 {
+                    Some(v6) => (v6, IpAddr::from(MDNS_IPV6)),
+                    None => {
+                        tracing::trace!("No IPv6 socket available, skipping IPv6 send");
+                        return;
+                    }
+                }
+            }
             Mode::Any => {
                 if let Some(v4) = &self.v4 {
                     (v4, IpAddr::from(MDNS_IPV4))
+                } else if let Some(v6) = &self.v6 {
+                    (v6, IpAddr::from(MDNS_IPV6))
                 } else {
-                    (self.v6.as_ref().unwrap(), IpAddr::from(MDNS_IPV6))
+                    tracing::warn!("No sockets available for sending");
+                    return;
                 }
             }
         };
+        
         if let Err(e) = socket.send_to(&bytes, (addr, MDNS_PORT)).await {
             tracing::warn!("error sending mDNS: {}", e);
         } else {
@@ -273,6 +343,7 @@ impl Sockets {
     }
 }
 
+#[derive(Clone, Copy)]
 pub enum Mode {
     V4,
     V6,

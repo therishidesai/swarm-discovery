@@ -8,7 +8,8 @@ mod updater;
 
 use acto::{AcTokio, ActoHandle, ActoRef, ActoRuntime, SupervisionRef, TokioJoinHandle};
 use hickory_proto::rr::Name;
-use socket::{SocketError, Sockets};
+use socket::SocketError;
+pub use socket::Sockets;
 use std::{
     collections::BTreeMap,
     fmt::Display,
@@ -363,7 +364,43 @@ impl Discoverer {
     pub fn spawn(self, handle: &Handle) -> Result<DropGuard, SpawnError> {
         let _entered = handle.enter();
         let sockets = Sockets::new(self.class)?;
-        tracing::trace!(?sockets, "created new sockets");
+        self.spawn_with_sockets(handle, vec![sockets])
+    }
+
+    /// Start the discovery service with multiple pre-configured sockets.
+    ///
+    /// This allows you to provide multiple `Sockets` instances, each potentially bound to
+    /// a different network interface or configured differently. The discovery service will
+    /// use all provided sockets for sending and receiving mDNS messages.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use swarm_discovery::{Discoverer, Sockets, IpClass};
+    /// use tokio::runtime::Handle;
+    /// 
+    /// let handle = Handle::current();
+    /// 
+    /// // Create multiple socket instances for different interfaces
+    /// let sockets1 = Sockets::new(IpClass::V4Only).unwrap();
+    /// let sockets2 = Sockets::new(IpClass::V6Only).unwrap();
+    /// 
+    /// let discoverer = Discoverer::new("service".to_string(), "peer1".to_string());
+    /// let _guard = discoverer.spawn_with_sockets(&handle, vec![sockets1, sockets2]).unwrap();
+    /// ```
+    pub fn spawn_with_sockets(
+        self,
+        handle: &Handle,
+        sockets: Vec<Sockets>,
+    ) -> Result<DropGuard, SpawnError> {
+        let _entered = handle.enter();
+        
+        if sockets.is_empty() {
+            return Err(SpawnError::Sockets {
+                source: socket::SocketError::CannotBind,
+            });
+        }
+
+        tracing::trace!("created {} socket instances", sockets.len());
 
         let service_name = Name::from_str(&format!("_{}.{}.local.", self.name, self.protocol))
             .map_err(|source| SpawnError::ServiceName {

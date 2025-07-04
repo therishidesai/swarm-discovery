@@ -27,7 +27,7 @@ pub enum MdnsMsg {
 
 pub async fn sender(
     mut ctx: ActoCell<MdnsMsg, AcTokioRuntime>,
-    sockets: Sockets,
+    sockets_vec: Vec<Sockets>,
     updater: ActoRef<updater::Input>,
     mut discoverer: Discoverer,
     service_name: Name,
@@ -77,7 +77,9 @@ pub async fn sender(
                         updater.send(updater::Input::Peers(resp));
                     }
                     MdnsMsg::Timeout(count) if count == timeout_count => {
-                        sockets.send_msg(&query, Mode::Any).await;
+                        for sockets in &sockets_vec {
+                            sockets.send_msg(&query, Mode::Any).await;
+                        }
                         break Mode::Any;
                     }
                     MdnsMsg::Timeout(_) => {}
@@ -130,7 +132,9 @@ pub async fn sender(
                     }
                     MdnsMsg::Timeout(count) if count == timeout_count => {
                         if let Some(response) = &response {
-                            sockets.send_msg(response, mode).await;
+                            for sockets in &sockets_vec {
+                                sockets.send_msg(response, mode).await;
+                            }
                             has_responded = true;
                         }
                         break;
